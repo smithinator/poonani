@@ -1,0 +1,5 @@
+[main] INFO dakota.poonani.Main - Starting instance of Poonani
+[main] INFO discord4j.core.DiscordClientBuilder - Shard 0 with Discord4J 3.0.11 (https://discord4j.com)
+[main] INFO dakota.poonani.Main - Created the client
+[main] INFO dakota.poonani.Main - Attempting to log in
+[reactor-http-nio-8] INFO discord4j.gateway.client.0 - Connected to Gateway
