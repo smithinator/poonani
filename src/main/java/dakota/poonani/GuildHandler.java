@@ -220,6 +220,9 @@ public class GuildHandler {
 						adminRole = client.getRoleById(guild.getId(), Snowflake.of(Long.valueOf(message.getContent().get().split("\n")[1]))).block();
 						logWithGuildId(LoggerLevel.DEBUG, "Found the admin role and stored it successfully");
 					});
+					if(adminRole == null) {
+						//TODO: edge case of storage channel without admin role
+					}
 				} catch(Exception e) {
 					logWithGuildId(LoggerLevel.ERROR, "Admin Role message retrieval failed:\n" + e.getMessage());
 				}
