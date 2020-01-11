@@ -233,7 +233,7 @@ public class Main {
 		PresenceBean customStatus = new PresenceBean();
 		customStatus.setStatus("Back from the dead!");
 		//customStatus.setStatus("Under construction!");
-		client = new DiscordClientBuilder("Mjk4MjE1ODg5NjUwNzEyNTk2.XgRFPQ.sABcdVFkF-v4vlunizVj6DaaOmc")
+		client = new DiscordClientBuilder(args[0])
 				.setInitialPresence(new Presence(customStatus))
 				//.setRetryOptions(new RetryOptions(Duration.ZERO, Duration.ZERO, Integer.MAX_VALUE, ???))
 				.build();
