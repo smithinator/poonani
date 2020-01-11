@@ -19,6 +19,7 @@ import java.util.Properties;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -27,13 +28,17 @@ import java.util.zip.DataFormatException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.sedmelluq.discord.lavaplayer.container.MediaContainerRegistry;
 import com.sedmelluq.discord.lavaplayer.format.StandardAudioDataFormats;
 import com.sedmelluq.discord.lavaplayer.player.AudioLoadResultHandler;
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayer;
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager;
+import com.sedmelluq.discord.lavaplayer.player.event.AudioEventAdapter;
+import com.sedmelluq.discord.lavaplayer.source.ProbingAudioSourceManager;
 import com.sedmelluq.discord.lavaplayer.tools.FriendlyException;
 import com.sedmelluq.discord.lavaplayer.track.AudioPlaylist;
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack;
+import com.sedmelluq.discord.lavaplayer.track.AudioTrackEndReason;
 import com.sedmelluq.discord.lavaplayer.track.playback.MutableAudioFrame;
 
 import discord4j.core.DiscordClient;
@@ -90,6 +95,8 @@ public class GuildHandler {
 	public static AudioPlayerManager audioPlayerManager;
 	private AudioPlayer audioPlayer;
 	private LavaPlayerAudioProvider lavaPlayer = new LavaPlayerAudioProvider();
+	private TrackScheduler trackScheduler = new TrackScheduler();
+	private LinkedBlockingQueue<AudioTrack> trackQueue = new LinkedBlockingQueue<AudioTrack>();
 	private VoiceConnection connection;
 	
 	private final class LavaPlayerAudioProvider extends AudioProvider {
@@ -110,6 +117,47 @@ public class GuildHandler {
 		}
 	}
 	
+	private final class TrackScheduler extends AudioEventAdapter {
+		
+		public void addTrack(AudioTrack track) {
+			//if nothing is currently playing, immediately play the track, otherwise queue it
+			if(audioPlayer.getPlayingTrack() == null) {
+				audioPlayer.playTrack(track);
+			} else {
+				try {
+					trackQueue.put(track);
+				} catch (InterruptedException e) {
+					e.getMessage();
+				}
+			}
+		}
+		
+		@Override
+		public void onTrackEnd(AudioPlayer player, AudioTrack track, AudioTrackEndReason endReason) {
+			if (endReason.mayStartNext) {
+			AudioTrack next = trackQueue.poll();
+				if(next != null) audioPlayer.playTrack(next);
+			}
+
+			// endReason == FINISHED: A track finished or died by an exception (mayStartNext = true).
+			// endReason == LOAD_FAILED: Loading of a track failed (mayStartNext = true).
+			// endReason == STOPPED: The player was stopped.
+			// endReason == REPLACED: Another track started playing while this had not finished
+			// endReason == CLEANUP: Player hasn't been queried for a while, if you want you can put a
+			//                       clone of this back to your queue
+		}
+
+		@Override
+		public void onTrackException(AudioPlayer player, AudioTrack track, FriendlyException exception) {
+			// An already playing track threw an exception (track end event will still be received separately)
+		}
+
+		@Override
+		public void onTrackStuck(AudioPlayer player, AudioTrack track, long thresholdMs) {
+			// Audio track has been unable to provide us any audio, might want to just start a new track
+		}
+	}
+	
 	/*
 	 * Constructors
 	 */
@@ -120,19 +168,19 @@ public class GuildHandler {
 	 */
 	public GuildHandler(Guild guild) {
 		this.guild = guild;
-		logWithGuildId(LoggerLevel.DEBUG, "Starting handler initialization. beginning storage channel and admin role initialization");
-		retrieveStorageChannelAndAdminRole();
-		logWithGuildId(LoggerLevel.DEBUG, "Completed storage/admin initialization, beginning routine initialization");
-		retrieveRoutines();
-		logWithGuildId(LoggerLevel.DEBUG, "Completed routine initialization, beginning reminder initialization");
-		retrieveReminders();
-		logWithGuildId(LoggerLevel.DEBUG, "Completed reminder initialization, beginning color role initialization");
-		retrieveColorRoles();
-		logWithGuildId(LoggerLevel.DEBUG, "Completed color role initialization, beginning color perm role initialization");
-		retrieveColorPermRole();
-		logWithGuildId(LoggerLevel.DEBUG, "Completed color perm role initialization, beginning user join message initialization");
-		retrieveUserJoinMessage();
-		logWithGuildId(LoggerLevel.DEBUG, "Completed user join message initialization, successfully initialized handler");
+//		logWithGuildId(LoggerLevel.DEBUG, "Starting handler initialization. beginning storage channel and admin role initialization");
+//		retrieveStorageChannelAndAdminRole();
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed storage/admin initialization, beginning routine initialization");
+//		retrieveRoutines();
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed routine initialization, beginning reminder initialization");
+//		retrieveReminders();
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed reminder initialization, beginning color role initialization");
+//		retrieveColorRoles();
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed color role initialization, beginning color perm role initialization");
+//		retrieveColorPermRole();
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed color perm role initialization, beginning user join message initialization");
+//		retrieveUserJoinMessage();
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed user join message initialization, successfully initialized handler");
 	}
 	
 	/*
@@ -340,9 +388,9 @@ public class GuildHandler {
 		if(!welcomeNewUser) return;
 		Member newUser = event.getMember();
 		if(newUserMention) {
-			guild.getSystemChannel().block().createMessage(newUserMessage);
+			guild.getSystemChannel().block().createMessage(newUserMessage).block();
 		} else {
-			guild.getSystemChannel().block().createMessage(newUser.getMention() + " " + newUserMessage);
+			guild.getSystemChannel().block().createMessage(newUser.getMention() + " " + newUserMessage).block();
 		}
 	}
 	
@@ -364,7 +412,7 @@ public class GuildHandler {
 		}
 		routineMessage += String.valueOf(routine.getTTS()) + " ";
 		routineMessage += routine.getResponse();
-		storageChannel.createMessage(routineMessage);
+		storageChannel.createMessage(routineMessage).block();
 	}
 	
 	//usage: :remindme: HR:MN PM MonthName dd, yyyy true/false event; hour and day must be 2 digits, time zone must be US Central
@@ -374,21 +422,21 @@ public class GuildHandler {
 		storageChannel.createMessage("REMINDER:\n:remindme: "
 				+ DateTimeFormatter.ofPattern("KK:mm a MMMM dd, yyyy").format(reminder.getTime()) + " "
 				+ String.valueOf(reminder.getMention())
-				+ reminder.getEvent());
+				+ reminder.getEvent()).block();
 	}
 	
 	private void storeColorRole(Role role)
 	{
 		//after dupe and perm checks, add role to poonani channel
-		storageChannel.createMessage("COLOR ROLE:\n" + role.getId().asLong());
+		storageChannel.createMessage("COLOR ROLE:\n" + role.getId().asLong()).block();
 	}
 	
 	private void storeColorPermRole(Role role) {
-		storageChannel.createMessage("COLOR PERM ROLE:\n" + role.getId().asLong());
+		storageChannel.createMessage("COLOR PERM ROLE:\n" + role.getId().asLong()).block();
 	}
 	
 	private void storeAdminRole(Role role) {
-		storageChannel.createMessage("ADMIN ROLE:\n" + role.getId().asLong());
+		storageChannel.createMessage("ADMIN ROLE:\n" + role.getId().asLong()).block();
 	}
 	
 	private static boolean permissionTest(Member member, Role permRole)
@@ -501,7 +549,7 @@ public class GuildHandler {
 			resources.load(in);
 		} catch (Exception e) {
 			e.printStackTrace();
-			PM.createMessage("Sorry, there was an error retrieving my help message. Contact the bot author.");
+			PM.createMessage("Sorry, there was an error retrieving my help message. Contact the bot author.").block();
 			return;
 		}
 		String helpMessage = resources.getProperty("helpPreString");
@@ -513,7 +561,7 @@ public class GuildHandler {
 			}
 		}
 		helpMessage += resources.getProperty("helpPostString");
-		PM.createMessage(helpMessage);
+		PM.createMessage(helpMessage).block();
 	}
 	
 	/**
@@ -533,7 +581,7 @@ public class GuildHandler {
 			colors += "\n";
 		}
 		//remove the last newline
-		channel.createMessage(colors.substring(0,colors.length()-1));
+		channel.createMessage(colors.substring(0,colors.length()-1)).block();
 	}
 	
 	/**
@@ -543,13 +591,13 @@ public class GuildHandler {
 		//if role already exists, delete original and replace
 		//else:
 		colorPermRole = channel.getGuild().block().getRoleById(Snowflake.of(message.substring(19))).block();
-		channel.createMessage("Set the color permission role to be " + message.substring(19));
+		channel.createMessage("Set the color permission role to be " + message.substring(19)).block();
 	}
 	
 	private void handleAddColor(String message, Member sender, GuildMessageChannel channel) {
 		if(!permissionTest(sender, colorPermRole))
 		{
-			channel.createMessage("You don't have the permissions for that.");
+			channel.createMessage("You don't have the permissions for that.").block();
 			return;
 		}
 		Scanner sc = new Scanner(message.substring(11));
@@ -563,7 +611,7 @@ public class GuildHandler {
 		}
 		catch(Exception e)
 		{
-			channel.createMessage("Improper arguments.");
+			channel.createMessage("Improper arguments.").block();
 			sc.close();
 			return;
 		}
@@ -572,12 +620,12 @@ public class GuildHandler {
 		{
 			if(r.getName().equals(name))
 			{
-				channel.createMessage("A color with that name already exists.");
+				channel.createMessage("A color with that name already exists.").block();
 				return;
 			}
 			if(r.getColor().getRed() == red && r.getColor().getGreen() == green && r.getColor().getBlue() == blue)
 			{
-				channel.createMessage("There is already a color with those values.");
+				channel.createMessage("There is already a color with those values.").block();
 				return;
 			}
 		}
@@ -585,7 +633,7 @@ public class GuildHandler {
 				role -> role.setName(name).setColor(new Color(red,green,blue))//TODO: .setPosition() if the default is not last
 		).block();
 		colorRoles.add(temp);
-		channel.createMessage(name + " added as a color.");
+		channel.createMessage(name + " added as a color.").block();
 	}
 	
 	//return true if a role has at least one member
@@ -599,17 +647,17 @@ public class GuildHandler {
 	private void handleRemoveColor(String message, Member sender, GuildMessageChannel channel) {
 		if(!permissionTest(sender, colorPermRole))
 		{
-			channel.createMessage("You don't have the permissions for that.");
+			channel.createMessage("You don't have the permissions for that.").block();
 			return;
 		}
 		Role role = channel.getGuild().block().getRoleById(Snowflake.of(message.substring(14))).block();
 		if(roleHasMember(channel.getGuild().block(), role))
 		{
-			channel.createMessage("Cannot delete this role, at least one user is still assigned to it.");
+			channel.createMessage("Cannot delete this role, at least one user is still assigned to it.").block();
 			return;
 		}
 		role.delete();
-		channel.createMessage("Color " + message.substring(14) + " deleted.");
+		channel.createMessage("Color " + message.substring(14) + " deleted.").block();
 		colorRoles.remove(role);
 		//channel.createMessage("No color by the name " + message.substring(14) + "found.");
 	}
@@ -617,17 +665,17 @@ public class GuildHandler {
 	private void handleSetColor(String message, Member sender, GuildMessageChannel channel) {
 		if(!permissionTest(sender, colorPermRole))
 		{
-			channel.createMessage("You don't have the permissions for that.");
+			channel.createMessage("You don't have the permissions for that.").block();
 			return;
 		}
 		Role color = channel.getGuild().block().getRoleById(Snowflake.of(message.substring(14))).block();
 		if(sender.getRoleIds().contains(color.getId()))
 		{
 			sender.removeRole(color.getId());
-			channel.createMessage("User color removed.");
+			channel.createMessage("User color removed.").block();
 		} else {
 			sender.addRole(color.getId());
-			channel.createMessage("User color set to " + color + ".");
+			channel.createMessage("User color set to " + color + ".").block();
 		}
 	}
 	
@@ -642,24 +690,25 @@ public class GuildHandler {
 				temp += taunt.getName() + '\n';
 			}
 			//erase the last newline
-			PM.createMessage(temp.substring(0,temp.length()-1));
+			PM.createMessage(temp.substring(0,temp.length()-1)).block();
 		}
 		catch(Exception e)
 		{
-			PM.createMessage("Error occurred when retrieving list of sound files.");
+			PM.createMessage("Error occurred when retrieving list of sound files.").block();
 		}
 		event.getMessage().delete();
 	}
 	
 	private void handleJoin(Member sender) {
 		audioPlayer = audioPlayerManager.createPlayer();
+		audioPlayer.addListener(trackScheduler);
 		
 		connection = sender.getVoiceState().block().getChannel().block().join(channel -> channel.setProvider(lavaPlayer)).block();
 	}
 	
 	private void handleLeave(GuildMessageChannel channel) {
 		if(connection == null) {
-			channel.createMessage("I'm not currently in any voice channels.");
+			channel.createMessage("I'm not currently in any voice channels.").block();
 		} else {
 			connection.disconnect();
 			connection = null;
@@ -667,48 +716,55 @@ public class GuildHandler {
 	}
 	
 	private void handlePlay(String message, MessageChannel channel) {
-		String taunt = "";
-		try
-		{
-			final String fileName = message.substring(7);
-			String filePath = "src/main/resources/taunts/";
-			List<Path> taunts = Files.list(Paths.get(filePath))
-				.filter(path -> path.getFileName().toString().startsWith(fileName))
-				.collect(Collectors.toList());
-			taunt = filePath + taunts.get(0).getFileName().toString();
-		}
-		catch(Exception e)
-		{
-			channel.createMessage("Improper arguments or taunt couldn't be found.");
+		String source;
+		
+		//ensure the audio source parameter is provided
+		try {
+			message.substring(7);
+		} catch(IndexOutOfBoundsException e) {
+			channel.createMessage("No argument provided. Provide a taunt name or link after the :play: command.").block();
 			return;
 		}
-		audioPlayerManager.loadItem(taunt, new AudioLoadResultHandler() {
+		
+		//determine whether the source is a file or link
+		if(message.contains("http")) {
+			source = message.substring(7);
+		} else {
+			source = "taunts/" + message.substring(7) + ".mp3";
+		}
+		
+		audioPlayerManager.loadItem(source, new AudioLoadResultHandler() {
 			@Override
-			public void loadFailed(FriendlyException arg0) {
-				channel.createMessage("Couldn't load the taunt. Maybe it doesn't exist or was typed incorrectly.");
+			public void loadFailed(FriendlyException e) {
+				channel.createMessage("Error: " + e.getMessage()).block();
 			}
 
 			@Override
 			public void noMatches() {
-				channel.createMessage("Couldn't load the taunt. Maybe it doesn't exist or was typed incorrectly.");
+				channel.createMessage("This looked like a file. No matching audio files for " + source + " were found.").block();
 			}
 
 			@Override
-			public void playlistLoaded(AudioPlaylist arg0) {
+			public void playlistLoaded(AudioPlaylist playlist) {
+				for(AudioTrack track : playlist.getTracks()) {
+					trackScheduler.addTrack(track);
+				}
 			}
 
 			@Override
 			public void trackLoaded(AudioTrack track) {
-				audioPlayer.playTrack(track);
+				trackScheduler.addTrack(track);
 			}
 		});
 	}
 	
-	/*
-	private void handleQueue(String message, MessageChannel channel) {
-		
+	private void handleSkip() {
+		audioPlayer.stopTrack();
+		AudioTrack next = trackQueue.poll();
+		if(next != null) {
+			audioPlayer.playTrack(next);
+		}
 	}
-	 */
 	
 	//usage: :remindme: HR:MN PM MonthName dd, yyyy true/false event; hour and day must be 2 digits, time zone must be US Central
 	private void handleAddReminder(String message, Member sender, GuildMessageChannel channel) {
@@ -717,7 +773,7 @@ public class GuildHandler {
 			reminders.add(newReminder);
 			storeReminder(newReminder);
 		} catch(IllegalArgumentException e) {
-			channel.createMessage(e.getMessage());
+			channel.createMessage(e.getMessage()).block();
 		}
 	}
 
@@ -728,12 +784,12 @@ public class GuildHandler {
 			routines.add(newRoutine);
 			storeRoutine(newRoutine);
 		} catch(Exception e) {
-			channel.createMessage(e.getMessage());
+			channel.createMessage(e.getMessage()).block();
 		}
 	}
 	
 	private static void sendGuildRequirementMessage(MessageChannel channel) {
-		channel.createMessage("This message must be used inside a specific Discord guild.");
+		channel.createMessage("This message must be used inside a specific Discord guild.").block();
 	}
 
 	/*
@@ -766,55 +822,55 @@ public class GuildHandler {
 		Member sender = event.getMember().get();
 		MessageChannel channel = event.getMessage().getChannel().block();
 		boolean isDM = !(channel instanceof GuildMessageChannel);
-		//TODO: change to some user-defined role rather than the owner
-		boolean isAdmin = !isDM && permissionTest(sender, adminRole);
-		
-		if(message.equals(":help:") || message.equals(":?:"))
-		{
-			handleHelpMessage(event, sender, routines);
-			return;
-		}
-		
-		if(message.startsWith(":colors:"))
-		{
-			if(isDM) sendGuildRequirementMessage(channel);
-			else handleColors(colorRoles, channel);
-			return;
-		}
-		
-		if(message.startsWith(":setcolorpermrole:") && isAdmin)
-		{
-			if(isDM) sendGuildRequirementMessage(channel);
-			else handleColorPermRole(message, (GuildMessageChannel) channel, colorPermRole);
-			return;
-		}
-		
-		if(message.startsWith(":addcolor:"))
-		{
-			if(isDM) sendGuildRequirementMessage(channel);
-			else handleAddColor(message, sender, (GuildMessageChannel) channel);
-			return;
-		}
-		
-		if(message.startsWith(":removecolor:"))
-		{
-			if(isDM) sendGuildRequirementMessage(channel);
-			else handleRemoveColor(message, sender, (GuildMessageChannel) channel);
-			return;
-		}
-		
-		if(message.startsWith(":setcolor:"))
-		{
-			if(isDM) sendGuildRequirementMessage(channel);
-			else handleSetColor(message, sender, (GuildMessageChannel) channel);
-			return;
-		}
-		
-		if(message.startsWith(":taunts:"))
-		{
-			handleTaunts(event, sender);
-			return;
-		}
+//		//TODO: change to some user-defined role rather than the owner
+//		boolean isAdmin = !isDM && permissionTest(sender, adminRole);
+//		
+//		if(message.equals(":help:") || message.equals(":?:"))
+//		{
+//			handleHelpMessage(event, sender, routines);
+//			return;
+//		}
+//		
+//		if(message.startsWith(":colors:"))
+//		{
+//			if(isDM) sendGuildRequirementMessage(channel);
+//			else handleColors(colorRoles, channel);
+//			return;
+//		}
+//		
+//		if(message.startsWith(":setcolorpermrole:") && isAdmin)
+//		{
+//			if(isDM) sendGuildRequirementMessage(channel);
+//			else handleColorPermRole(message, (GuildMessageChannel) channel, colorPermRole);
+//			return;
+//		}
+//		
+//		if(message.startsWith(":addcolor:"))
+//		{
+//			if(isDM) sendGuildRequirementMessage(channel);
+//			else handleAddColor(message, sender, (GuildMessageChannel) channel);
+//			return;
+//		}
+//		
+//		if(message.startsWith(":removecolor:"))
+//		{
+//			if(isDM) sendGuildRequirementMessage(channel);
+//			else handleRemoveColor(message, sender, (GuildMessageChannel) channel);
+//			return;
+//		}
+//		
+//		if(message.startsWith(":setcolor:"))
+//		{
+//			if(isDM) sendGuildRequirementMessage(channel);
+//			else handleSetColor(message, sender, (GuildMessageChannel) channel);
+//			return;
+//		}
+//		
+//		if(message.startsWith(":taunts:"))
+//		{
+//			handleTaunts(event, sender);
+//			return;
+//		}
 		
 		if(message.startsWith(":join:"))
 		{
@@ -837,23 +893,30 @@ public class GuildHandler {
 			return;
 		}
 		
-		if(message.startsWith(":remindme:"))
-		{
-			handleAddReminder(message, sender, (GuildMessageChannel) channel);
-			return;
-		}
-		
-		if(message.startsWith(":addnew:") && isAdmin)
+		if(message.startsWith(":skip:"))
 		{
 			if(isDM) sendGuildRequirementMessage(channel);
-			else handleAddRoutine(message, (GuildMessageChannel) channel);
+			else handleSkip();
 			return;
 		}
-		
-		//the message has no known commands, check for routine triggers
-		for(Routine r : routines)
-		{
-			if(r.findTrigger(message, sender)) channel.createMessage(ttsMessage -> ttsMessage.setContent(r.getResponse()).setTts(r.getTTS()));
-		}
+//		
+//		if(message.startsWith(":remindme:"))
+//		{
+//			handleAddReminder(message, sender, (GuildMessageChannel) channel);
+//			return;
+//		}
+//		
+//		if(message.startsWith(":addnew:") && isAdmin)
+//		{
+//			if(isDM) sendGuildRequirementMessage(channel);
+//			else handleAddRoutine(message, (GuildMessageChannel) channel);
+//			return;
+//		}
+//		
+//		//the message has no known commands, check for routine triggers
+//		for(Routine r : routines)
+//		{
+//			if(r.findTrigger(message, sender)) channel.createMessage(ttsMessage -> ttsMessage.setContent(r.getResponse()).setTts(r.getTTS())).block();
+//		}
 	}
 }
