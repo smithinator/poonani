@@ -11,10 +11,13 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Scanner;
 import java.util.Set;
@@ -28,13 +31,11 @@ import java.util.zip.DataFormatException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.sedmelluq.discord.lavaplayer.container.MediaContainerRegistry;
 import com.sedmelluq.discord.lavaplayer.format.StandardAudioDataFormats;
 import com.sedmelluq.discord.lavaplayer.player.AudioLoadResultHandler;
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayer;
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager;
 import com.sedmelluq.discord.lavaplayer.player.event.AudioEventAdapter;
-import com.sedmelluq.discord.lavaplayer.source.ProbingAudioSourceManager;
 import com.sedmelluq.discord.lavaplayer.tools.FriendlyException;
 import com.sedmelluq.discord.lavaplayer.track.AudioPlaylist;
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack;
@@ -48,10 +49,12 @@ import discord4j.core.object.PermissionOverwrite;
 import discord4j.core.object.entity.Guild;
 import discord4j.core.object.entity.GuildMessageChannel;
 import discord4j.core.object.entity.Member;
+import discord4j.core.object.entity.Message;
 import discord4j.core.object.entity.MessageChannel;
 import discord4j.core.object.entity.PrivateChannel;
 import discord4j.core.object.entity.Role;
 import discord4j.core.object.entity.TextChannel;
+import discord4j.core.object.entity.User;
 import discord4j.core.object.util.Permission;
 import discord4j.core.object.util.PermissionSet;
 import discord4j.core.object.util.Snowflake;
@@ -71,19 +74,27 @@ public class GuildHandler {
 	}
 	
 	public static DiscordClient client;
+	private static PrivateChannel authorPM;
 	
 	//Guild-specific info
 	private Guild guild;
+	private Role adminRole;
+	private Role colorPermRole;
+	private Set<Role> colorRoles;
 	private List<Routine> routines;
 	private List<Reminder> reminders;
-	private Set<Role> colorRoles;
-	private Role colorPermRole;
-	private Role adminRole;
-	
-	//New user
 	private boolean welcomeNewUser = true;
 	private boolean newUserMention = true;
 	private String newUserMessage = "https://www.youtube.com/watch?v=Za2PJnCAkUA";
+	
+	//Storage channel message IDs
+	private Message idStorageMessage;
+	private Long adminRoleMessageId;
+	private Long colorPermRoleMessageId;
+	private HashMap<Long, Long> colorRoleMessageIds;
+	private HashMap<Long, Long> routineMessageIds;
+	private HashMap<Long, Long> reminderMessageIds;
+	private Long newUserMessageId;
 	
 	//Storage
 	private TextChannel storageChannel;
@@ -118,6 +129,10 @@ public class GuildHandler {
 	}
 	
 	private final class TrackScheduler extends AudioEventAdapter {
+		private void playNextTrack() {
+			AudioTrack next = trackQueue.poll();
+			if(next != null) audioPlayer.playTrack(next);
+		}
 		
 		public void addTrack(AudioTrack track) {
 			//if nothing is currently playing, immediately play the track, otherwise queue it
@@ -135,26 +150,18 @@ public class GuildHandler {
 		@Override
 		public void onTrackEnd(AudioPlayer player, AudioTrack track, AudioTrackEndReason endReason) {
 			if (endReason.mayStartNext) {
-			AudioTrack next = trackQueue.poll();
-				if(next != null) audioPlayer.playTrack(next);
+				playNextTrack();
 			}
-
-			// endReason == FINISHED: A track finished or died by an exception (mayStartNext = true).
-			// endReason == LOAD_FAILED: Loading of a track failed (mayStartNext = true).
-			// endReason == STOPPED: The player was stopped.
-			// endReason == REPLACED: Another track started playing while this had not finished
-			// endReason == CLEANUP: Player hasn't been queried for a while, if you want you can put a
-			//                       clone of this back to your queue
 		}
 
 		@Override
 		public void onTrackException(AudioPlayer player, AudioTrack track, FriendlyException exception) {
-			// An already playing track threw an exception (track end event will still be received separately)
+			playNextTrack();
 		}
 
 		@Override
 		public void onTrackStuck(AudioPlayer player, AudioTrack track, long thresholdMs) {
-			// Audio track has been unable to provide us any audio, might want to just start a new track
+			playNextTrack();
 		}
 	}
 	
@@ -168,19 +175,24 @@ public class GuildHandler {
 	 */
 	public GuildHandler(Guild guild) {
 		this.guild = guild;
-//		logWithGuildId(LoggerLevel.DEBUG, "Starting handler initialization. beginning storage channel and admin role initialization");
-//		retrieveStorageChannelAndAdminRole();
-//		logWithGuildId(LoggerLevel.DEBUG, "Completed storage/admin initialization, beginning routine initialization");
+		logWithGuildId(LoggerLevel.DEBUG, "Starting handler initialization. beginning storage channel and admin role initialization");
+		retrieveStorageChannelAndAdminRole();
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed storage channel and admin role initialization, beginning color perm role initialization");
+//		retrieveColorPermRole();
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed color perm role initialization, beginning color role initialization");
+//		retrieveColorRoles();
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed color role initialization, beginning routine initialization");
 //		retrieveRoutines();
 //		logWithGuildId(LoggerLevel.DEBUG, "Completed routine initialization, beginning reminder initialization");
 //		retrieveReminders();
-//		logWithGuildId(LoggerLevel.DEBUG, "Completed reminder initialization, beginning color role initialization");
-//		retrieveColorRoles();
-//		logWithGuildId(LoggerLevel.DEBUG, "Completed color role initialization, beginning color perm role initialization");
-//		retrieveColorPermRole();
-//		logWithGuildId(LoggerLevel.DEBUG, "Completed color perm role initialization, beginning user join message initialization");
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed reminder initialization, beginning user join message initialization");
 //		retrieveUserJoinMessage();
-//		logWithGuildId(LoggerLevel.DEBUG, "Completed user join message initialization, successfully initialized handler");
+//		logWithGuildId(LoggerLevel.DEBUG, "Completed user join message initialization, finished handler initialization");
+		
+		//send welcome message into storage channel tagging admin role, describing settings that can be set
+		
+		//initialize PM channel between poonani and me for automatic error reporting
+		authorPM = client.getUserById(Snowflake.of(205232518696402944L)).flatMap(user -> user.getPrivateChannel()).block();
 	}
 	
 	/*
@@ -204,7 +216,7 @@ public class GuildHandler {
 	}
 	
 	/*
-	 * Methods
+	 * Utility methods
 	 */
 	
 	private void logWithGuildId(LoggerLevel level, String message) {
@@ -225,10 +237,105 @@ public class GuildHandler {
 		}
 	}
 	
+	private static boolean setContainsPermission(PermissionSet set, Permission permission) {
+		//The permission string ANDed with a permission set containing the desired permission should equal 0 or a permission set of only the desired permission
+		return set.and(PermissionSet.of(permission)).equals(PermissionSet.of(permission));
+	}
+	
+	private static boolean permissionTest(Member member, Role permRole)
+	{
+		return member.getHighestRole().block().getPosition().block() >= permRole.getPosition().block();
+	}
+	
+	//given a newline before the line with an ID, returns the ID by returning everything up until the next newline as a Long
+	private Long getIdFromStorageMessage(int newlineIndex) {
+		String storageMessage = idStorageMessage.getContent().get();
+		storageMessage = storageMessage.substring(newlineIndex);
+		return Long.valueOf(storageMessage.substring(0, storageMessage.indexOf("\n")));
+	}
+	
+	private void createDefaultAdminRole() {
+		adminRole = guild.createRole(spec -> spec.setName("Poonani Admin").setReason("No admin role for Poonani existed yet, created a default").setPermissions(PermissionSet.of(Permission.MANAGE_GUILD))).block();
+		guild.getOwner().subscribe(owner -> owner.addRole(adminRole.getId()));
+		logWithGuildId(LoggerLevel.DEBUG, "Created initial default admin role and assigned to guild owner successfully");
+	}
+	
+	/*
+	 * Storage methods
+	 */
+	
+	//This method is separated from createDefaultAdminRole because during guild initialization the storage channel must be created in between the role's creation and storage
+	private void storeAdminRole() {
+		adminRoleMessageId = storageChannel.createMessage("ADMIN ROLE:\n" + adminRole.getId().asLong()).block().getId().asLong();
+		if(adminRoleMessageId != null) {
+			logWithGuildId(LoggerLevel.DEBUG, "Successfully stored the admin role information in the storage channel");
+			
+			//insert ID of admin role message into ID storage message
+			idStorageMessage.edit(messageSpec -> {
+				messageSpec.setContent(idStorageMessage.getContent().get() + "\nADMIN ROLE MESSAGE:\n" + adminRoleMessageId);
+			});
+		} else {
+			logWithGuildId(LoggerLevel.ERROR, "Something went wrong while storing the admin role information in the storage channel");
+		}
+	}
+	
+	private void storeColorPermRole() {
+		colorPermRoleMessageId = storageChannel.createMessage("COLOR PERM ROLE:\n" + colorPermRole.getId().asLong()).block().getId().asLong();
+		if(colorPermRoleMessageId != null) {
+			logWithGuildId(LoggerLevel.DEBUG, "Successfully stored the color perm role information in the storage channel");
+			
+			//insert ID of color perm role message into ID storage message
+			idStorageMessage.edit(messageSpec -> {
+				messageSpec.setContent(idStorageMessage.getContent().get() + "\nCOLOR PERM ROLE MESSAGE:\n" + colorPermRoleMessageId);
+			});
+		} else {
+			logWithGuildId(LoggerLevel.ERROR, "Something went wrong while storing the color perm role information in the storage channel");
+		}
+	}
+	
+	private void storeColorRole(Role role)
+	{
+		
+	}
+	
+	//usage: :addnew: :triggers: true/false users true/false response
 	/**
-	 * These two processes are handled in the same method because they are interdependent. The execution logic is:
-	 * if storage channel is nonexistent (new guild) -> create default admin role if it doesn't already exist, then create storage channel (with perms for new admin role)
-	 * else read storage channel, then read admin role from storage channel
+	 * Validates and stores a new routine.
+	 * @param routine
+	 */
+	private void storeRoutine(Routine routine)
+	{
+		//perm checks below in handleAdd
+		String routineMessage = "ROUTINE:\n:addnew: ";
+		for(String trigger : routine.getTriggers()) {
+			routineMessage += trigger += " ";
+		}
+		routineMessage += String.valueOf(routine.getCheckPhraseExists()) + " ";
+		for(Map.Entry<Long, Long> user : routine.getUsers().entrySet()) {
+			routineMessage += user.getKey() + " ";
+		}
+		routineMessage += String.valueOf(routine.getTTS()) + " ";
+		routineMessage += routine.getResponse();
+		storageChannel.createMessage(routineMessage).block();
+	}
+	
+	//usage: :remindme: HR:MN PM MonthName dd, yyyy true/false event; hour and day must be 2 digits, time zone must be US Central
+	private void storeReminder(Reminder reminder)
+	{
+		//perm checks below in handleAdd
+		storageChannel.createMessage("REMINDER:\n:remindme: "
+				+ DateTimeFormatter.ofPattern("KK:mm a MMMM dd, yyyy").format(reminder.getTime()) + " "
+				+ String.valueOf(reminder.getMention())
+				+ reminder.getEvent()).block();
+	}
+	
+	/*
+	 * Retrieval methods
+	 */
+	
+	/**
+	 * These two processes are handled in the same method because they are interdependent.
+	 * If they don't exist the admin role is created, first, but if they do exist the storage channel must be read first
 	 * If the storage channel does exist, then all the pinned messages are searched to find the stored admin role. The admin role is in the format:
 	 * ADMIN ROLE:
 	 * [role id]
@@ -237,26 +344,39 @@ public class GuildHandler {
 		guild.getChannels().filter(channel -> channel instanceof TextChannel).filter(channel -> channel.getName().equals(STORAGE_CHANNEL)).collectList().subscribe(channels -> {
 			if(channels.isEmpty()) {
 				//new guild, create default admin role and assign to owner
-				logWithGuildId(LoggerLevel.DEBUG, "Storage channel not found, creating a default admin role and then the channel");
+				logWithGuildId(LoggerLevel.DEBUG, "Storage channel not found, creating it with perms for the lowest role with Manage Server permissions");
 				
-				//Handle the edge case that the default admin role exists without the storage channel
-				List<Role> adminRoles = guild.getRoles().filter(role -> role.getName().equals("Poonani Admin")).collectList().block();
-				if(!adminRoles.isEmpty()) {
-					adminRole = adminRoles.get(0);
-					logWithGuildId(LoggerLevel.WARN, "Storage channel wasn't found but the admin role was. Guild data may be in bad state. Using the existing role");
+				//sort roles from lowest perms to highest; find the lowest role that has the Manage Server permission
+				adminRole = guild.getRoles().sort((Role r1, Role r2) -> ((Long) r1.getPermissions().getRawValue()).compareTo((Long) r2.getPermissions().getRawValue())).filter(role -> setContainsPermission(role.getPermissions(), Permission.MANAGE_GUILD)).blockFirst();
+				if(adminRole != null) {
+					logWithGuildId(LoggerLevel.DEBUG, "Found an existing role with the Manage Server permission, assigned it to adminRole");
 				} else {
-					//TODO: look for lowest role with "Manage Server" perm, use this as 
-					adminRole = guild.createRole(spec -> spec.setName("Poonani Admin").setReason("No admin role for Poonani existed yet, created a default")).block();
-					guild.getOwner().subscribe(owner -> owner.addRole(adminRole.getId()));
-					logWithGuildId(LoggerLevel.DEBUG, "Created initial default admin role and assigned to guild owner successfully");
+					logWithGuildId(LoggerLevel.DEBUG, "Did not find an existing role with the Manage Server permission. Creating one and assigning it to the owner");
+					createDefaultAdminRole();
+					
 					//create a new channel that is visible to adminRole and Poonani but not visible to @everyone role
 					Set<PermissionOverwrite> perms = new HashSet<PermissionOverwrite>();
 					perms.add(PermissionOverwrite.forRole(guild.getEveryoneRole().block().getId(), PermissionSet.none(), PermissionSet.of(Permission.VIEW_CHANNEL)));
 					perms.add(PermissionOverwrite.forRole(adminRole.getId(), PermissionSet.of(Permission.VIEW_CHANNEL), PermissionSet.none()));
 					perms.add(PermissionOverwrite.forMember(client.getSelf().block().asMember(guild.getId()).block().getId(), PermissionSet.of(Permission.VIEW_CHANNEL), PermissionSet.none()));
 					storageChannel = guild.createTextChannel(spec -> spec.setName(STORAGE_CHANNEL).setTopic(STORAGE_CHANNEL_DESC).setPermissionOverwrites(perms).setReason(STORAGE_CHANNEL_CREATE_REASON)).block();
-					logWithGuildId(LoggerLevel.DEBUG, "Storage channel created successfully");
+					if(storageChannel != null) {
+						logWithGuildId(LoggerLevel.DEBUG, "Storage channel created successfully");
+						
+						//create the ID storage message
+						idStorageMessage = storageChannel.createMessage("Stored information message IDs:").block();
+						if(idStorageMessage != null) {
+							logWithGuildId(LoggerLevel.DEBUG, "ID storage message created successfully");
+						} else {
+							logWithGuildId(LoggerLevel.DEBUG, "Something went wrong while creating the ID storage message");
+							return;
+						}
+					} else {
+						logWithGuildId(LoggerLevel.ERROR, "Something went wrong while creating the storage channel");
+						return;
+					}
 				}
+				storeAdminRole();
 			} else {
 				logWithGuildId(LoggerLevel.DEBUG, "Storage channel found successfully");
 				storageChannel = (TextChannel) channels.get(0);
@@ -264,16 +384,72 @@ public class GuildHandler {
 				//retrieve admin role
 				try {
 					storageChannel.getPinnedMessages().filter(message -> message.getContent().filter(content -> content.startsWith("ADMIN ROLE:\n")).isPresent()).subscribe(message -> {
-						//get everything after the first newline, since in stored form the message should be COLOR ROLE:\n[actual message]
 						adminRole = client.getRoleById(guild.getId(), Snowflake.of(Long.valueOf(message.getContent().get().split("\n")[1]))).block();
-						logWithGuildId(LoggerLevel.DEBUG, "Found the admin role and stored it successfully");
+						if(adminRole != null) {
+							logWithGuildId(LoggerLevel.DEBUG, "Retrieved the admin role successfully");
+						} else {
+							logWithGuildId(LoggerLevel.ERROR, "Something went wrong while retrieving the admin role");
+						}
 					});
 					if(adminRole == null) {
-						//TODO: edge case of storage channel without admin role
+						logWithGuildId(LoggerLevel.DEBUG, "Storage channel exists but adminRole message does not exist, guild data may be in a bad state. Creating default role");
+						createDefaultAdminRole();
+						storeAdminRole();
 					}
 				} catch(Exception e) {
 					logWithGuildId(LoggerLevel.ERROR, "Admin Role message retrieval failed:\n" + e.getMessage());
 				}
+			}
+		});
+	}
+	
+	/**
+	 * Default behavior at initialization sets the color perm role to be the admin role.
+	 * The color permission role is in the format:
+	 * COLOR PERM ROLE:
+	 * [role id]
+	 */
+	private void retrieveColorPermRole() {
+		if(idStorageMessage.getContent().get().indexOf("COLOR PERM ROLE:\n") == -1) {
+			colorPermRole = adminRole;
+			colorPermRoleMessageId = storageChannel.createMessage("COLOR PERM ROLE:\n" + colorPermRole.getId().asLong()).block().getId().asLong();
+			//idstoragemessage edit
+			logWithGuildId(LoggerLevel.DEBUG, "New guild, set the color perm role to the admin role and stored it in the storage channel");
+		} else {
+			colorPermRoleMessageId = getIdFromStorageMessage(idStorageMessage.getContent().get().indexOf("COLOR PERM ROLE:\n") + 17);
+			colorPermRole = client.getRoleById(guild.getId(), Snowflake.of(Long.valueOf(storageChannel.getMessageById(Snowflake.of(colorPermRoleMessageId)).block().getContent().get().split("\n")[1]))).block();
+			if(colorPermRole != null) {
+				logWithGuildId(LoggerLevel.DEBUG, "Successfully retrieved the existing color perm role");
+			} else {
+				logWithGuildId(LoggerLevel.DEBUG, "Something went wrong while attempting to retrieve the existing color perm role! Attempting to salvage by setting the color perm role to the admin role");
+				colorPermRole = adminRole;
+				colorPermRoleMessageId = storageChannel.createMessage("COLOR PERM ROLE:\n" + colorPermRole.getId().asLong()).block().getId().asLong();
+				//idstoragemessage edit
+			}
+		}
+	}
+	
+	/**
+	 * One message contains COLOR ROLE MESSAGES:\n followed by newline delineated list of IDs
+	 * Color roles are in the format:
+	 * COLOR ROLE:
+	 * [role id]
+	 */
+	private void retrieveColorRoles() {
+		colorRoles = new HashSet<Role>();
+		if(colorRoleMessageIds == null) {
+			colorPermRoleMessageId = storageChannel.createMessage("COLOR PERM ROLE:\n" + colorPermRole.getId().asLong()).block().getId().asLong();
+			logWithGuildId(LoggerLevel.DEBUG, "New guild, set the color perm role to the admin role and stored it in the storage channel");
+		} else {
+			
+		}
+		storageChannel.getPinnedMessages().filter(message -> message.getContent().filter(content -> content.startsWith("COLOR ROLE:\n")).isPresent()).subscribe(message -> {
+			try {
+				//get everything after the first newline, since in stored form the message should be COLOR ROLE:\n[actual message]
+				colorRoles.add(client.getRoleById(guild.getId(), Snowflake.of(Long.valueOf(message.getContent().get().split("\n")[1]))).block());
+				logWithGuildId(LoggerLevel.DEBUG, "Found a color role and successfully stored it");
+			} catch(IllegalArgumentException e) {
+				logWithGuildId(LoggerLevel.ERROR, "Color Role retrieval failed:\n" + e.getMessage());
 			}
 		});
 	}
@@ -309,50 +485,13 @@ public class GuildHandler {
 			try {
 				//get everything after the first three newlines, since in stored form the message should be REMINDER:\n[userid]\n[channelid]\n[actual message]
 				String[] content = message.getContent().get().split("\n");
-				reminders.add(parseReminder(content[3], Long.valueOf(content[1]), Long.valueOf(content[2])));
+				//TODO: NULL CHECK!
+				reminders.add(parseReminder(content[3], Long.valueOf(content[1]), (MessageChannel) client.getChannelById(Snowflake.of(Long.valueOf(content[2]))).block()));
 				logWithGuildId(LoggerLevel.DEBUG, "Found a reminder and successfully stored it");
 			} catch(IllegalArgumentException e) {
 				logWithGuildId(LoggerLevel.ERROR, "Reminder message failed to parse:\n" + e.getMessage());
 			}
 		});
-	}
-	
-	/**
-	 * At initialization, searches all the pinned messages of the storage channel to find stored color roles. Color roles are in the format:
-	 * COLOR ROLE:
-	 * [role id]
-	 */
-	private void retrieveColorRoles() {
-		colorRoles = new HashSet<Role>();
-		storageChannel.getPinnedMessages().filter(message -> message.getContent().filter(content -> content.startsWith("COLOR ROLE:\n")).isPresent()).subscribe(message -> {
-			try {
-				//get everything after the first newline, since in stored form the message should be COLOR ROLE:\n[actual message]
-				colorRoles.add(client.getRoleById(guild.getId(), Snowflake.of(Long.valueOf(message.getContent().get().split("\n")[1]))).block());
-				logWithGuildId(LoggerLevel.DEBUG, "Found a color role and successfully stored it");
-			} catch(IllegalArgumentException e) {
-				logWithGuildId(LoggerLevel.ERROR, "Color Role retrieval failed:\n" + e.getMessage());
-			}
-		});
-	}
-	/**
-	 * At initialization, searches all the pinned messages of the storage channel to find the stored color permission role. The color permission role is in the format:
-	 * COLOR PERM ROLE:
-	 * [role id]
-	 */
-	private void retrieveColorPermRole() {
-		storageChannel.getPinnedMessages().filter(message -> message.getContent().filter(content -> content.startsWith("COLOR PERM ROLE:\n")).isPresent()).subscribe(message -> {
-			try {
-				//get everything after the first newline, since in stored form the message should be COLOR PERM ROLE:\n[actual message]
-				colorPermRole = client.getRoleById(guild.getId(), Snowflake.of(Long.valueOf(message.getContent().get().split("\n")[1]))).block();
-				logWithGuildId(LoggerLevel.DEBUG, "Found the color perm role and stored it successfully");
-			} catch(IllegalArgumentException e) {
-				logWithGuildId(LoggerLevel.ERROR, "Color Perm Role message retrieval failed:\n" + e.getMessage());
-			}
-		});
-		//no role found. must be called before retrieveAdminRole, as the default/new guild behavior is to set this role to the admin role
-		if(colorPermRole == null) {
-			colorPermRole = adminRole;
-		}
 	}
 	
 	/**
@@ -378,10 +517,14 @@ public class GuildHandler {
 		}
 	}
 	
+	/*
+	 * Handler methods
+	 */
+	
 	/**
 	 * Prints a message to the system channel welcoming a new user, if the feature is enabled.
 	 * May or may not mention the user depending on the mention setting.
-	 * @param event
+	 * @param event The event for the member joining
 	 */
 	public void handle(MemberJoinEvent event)
 	{
@@ -392,56 +535,6 @@ public class GuildHandler {
 		} else {
 			guild.getSystemChannel().block().createMessage(newUser.getMention() + " " + newUserMessage).block();
 		}
-	}
-	
-	//usage: :addnew: :triggers: true/false users true/false response
-	/**
-	 * Validates and stores a new routine.
-	 * @param routine
-	 */
-	private void storeRoutine(Routine routine)
-	{
-		//perm checks below in handleAdd
-		String routineMessage = "ROUTINE:\n:addnew: ";
-		for(String trigger : routine.getTriggers()) {
-			routineMessage += trigger += " ";
-		}
-		routineMessage += String.valueOf(routine.getCheckPhraseExists()) + " ";
-		for(Map.Entry<Long, Long> user : routine.getUsers().entrySet()) {
-			routineMessage += user.getKey() + " ";
-		}
-		routineMessage += String.valueOf(routine.getTTS()) + " ";
-		routineMessage += routine.getResponse();
-		storageChannel.createMessage(routineMessage).block();
-	}
-	
-	//usage: :remindme: HR:MN PM MonthName dd, yyyy true/false event; hour and day must be 2 digits, time zone must be US Central
-	private void storeReminder(Reminder reminder)
-	{
-		//perm checks below in handleAdd
-		storageChannel.createMessage("REMINDER:\n:remindme: "
-				+ DateTimeFormatter.ofPattern("KK:mm a MMMM dd, yyyy").format(reminder.getTime()) + " "
-				+ String.valueOf(reminder.getMention())
-				+ reminder.getEvent()).block();
-	}
-	
-	private void storeColorRole(Role role)
-	{
-		//after dupe and perm checks, add role to poonani channel
-		storageChannel.createMessage("COLOR ROLE:\n" + role.getId().asLong()).block();
-	}
-	
-	private void storeColorPermRole(Role role) {
-		storageChannel.createMessage("COLOR PERM ROLE:\n" + role.getId().asLong()).block();
-	}
-	
-	private void storeAdminRole(Role role) {
-		storageChannel.createMessage("ADMIN ROLE:\n" + role.getId().asLong()).block();
-	}
-	
-	private static boolean permissionTest(Member member, Role permRole)
-	{
-		return member.getHighestRole().block().getPosition().block() >= permRole.getPosition().block();
 	}
 	
 	private Routine parseRoutine(String message) {
@@ -509,7 +602,7 @@ public class GuildHandler {
 		return verify;
 	}
 	
-	private static Reminder parseReminder(String message, Long userId, Long channelId) {
+	private static Reminder parseReminder(String message, Long userId, MessageChannel channel) {
 		try
 		{
 			Pattern pattern = Pattern.compile("\\d{4}"); //find the year, the last part of the date
@@ -520,20 +613,18 @@ public class GuildHandler {
 			{
 				lastDigit = matcher.start() + 3;
 				date = message.substring(11, lastDigit + 1); //exclude ":remindme: " and continue to the last digit
+			} else {
+				throw new DataFormatException();
 			}
-			else throw new DataFormatException();
 			DateTimeFormatter formatter = DateTimeFormatter.ofPattern("KK:mm a MMMM dd, yyyy");
-			Reminder newReminder = new Reminder(message.substring(matcher.start() + 5), LocalDateTime.from(formatter.parse(date)), true, userId, channelId);
-			throw new IllegalArgumentException("Okay, I'll remind you about \"" + newReminder.getEvent() + "\" at " + date);
+			Reminder newReminder = new Reminder(message.substring(matcher.start() + 5), LocalDateTime.from(formatter.parse(date)), true, userId, channel.getId().asLong());
+			channel.createMessage("Okay, I'll remind you about \"" + newReminder.getEvent() + "\" at " + date).block();
 		}
 		catch(Exception e) {
-			throw new IllegalArgumentException("Sorry, I couldn't understand that date and time. The usage is :remindme: HR:MN PM MonthName dd, yyyy true/false event; hour and day must be 2 digits.");
+			channel.createMessage("Sorry, I couldn't understand that date and time. The usage is :remindme: HR:MN PM MonthName dd, yyyy true/false event; hour and day must be 2 digits.").block();
 		}
+		return null;
 	}
-	
-	/*
-	 * Handler methods
-	 */
 	
 	/**
 	 * 
@@ -567,7 +658,7 @@ public class GuildHandler {
 	/**
 	 * 
 	 */
-	private static void handleColors(Set<Role> colorRoles, MessageChannel channel) {
+	private void handleColors(Set<Role> colorRoles, MessageChannel channel) {
 		String colors = "Available colors are:\n";
 		for(Role r : colorRoles)
 		{
@@ -587,14 +678,14 @@ public class GuildHandler {
 	/**
 	 * 
 	 */
-	private static void handleColorPermRole(String message, GuildMessageChannel channel, Role colorPermRole) {
+	private void handleColorPermRole(String message, MessageChannel channel, Role colorPermRole) {
 		//if role already exists, delete original and replace
 		//else:
-		colorPermRole = channel.getGuild().block().getRoleById(Snowflake.of(message.substring(19))).block();
+		colorPermRole = guild.getRoleById(Snowflake.of(message.substring(19))).block();
 		channel.createMessage("Set the color permission role to be " + message.substring(19)).block();
 	}
 	
-	private void handleAddColor(String message, Member sender, GuildMessageChannel channel) {
+	private void handleAddColor(String message, Member sender, MessageChannel channel) {
 		if(!permissionTest(sender, colorPermRole))
 		{
 			channel.createMessage("You don't have the permissions for that.").block();
@@ -629,7 +720,7 @@ public class GuildHandler {
 				return;
 			}
 		}
-		Role temp = channel.getGuild().block().createRole(
+		Role temp = guild.createRole(
 				role -> role.setName(name).setColor(new Color(red,green,blue))//TODO: .setPosition() if the default is not last
 		).block();
 		colorRoles.add(temp);
@@ -644,14 +735,14 @@ public class GuildHandler {
 		return false;
 	}
 	
-	private void handleRemoveColor(String message, Member sender, GuildMessageChannel channel) {
+	private void handleRemoveColor(String message, Member sender, MessageChannel channel) {
 		if(!permissionTest(sender, colorPermRole))
 		{
 			channel.createMessage("You don't have the permissions for that.").block();
 			return;
 		}
-		Role role = channel.getGuild().block().getRoleById(Snowflake.of(message.substring(14))).block();
-		if(roleHasMember(channel.getGuild().block(), role))
+		Role role = guild.getRoleById(Snowflake.of(message.substring(14))).block();
+		if(roleHasMember(guild, role))
 		{
 			channel.createMessage("Cannot delete this role, at least one user is still assigned to it.").block();
 			return;
@@ -662,13 +753,13 @@ public class GuildHandler {
 		//channel.createMessage("No color by the name " + message.substring(14) + "found.");
 	}
 	
-	private void handleSetColor(String message, Member sender, GuildMessageChannel channel) {
+	private void handleSetColor(String message, Member sender, MessageChannel channel) {
 		if(!permissionTest(sender, colorPermRole))
 		{
 			channel.createMessage("You don't have the permissions for that.").block();
 			return;
 		}
-		Role color = channel.getGuild().block().getRoleById(Snowflake.of(message.substring(14))).block();
+		Role color = guild.getRoleById(Snowflake.of(message.substring(14))).block();
 		if(sender.getRoleIds().contains(color.getId()))
 		{
 			sender.removeRole(color.getId());
@@ -699,14 +790,20 @@ public class GuildHandler {
 		event.getMessage().delete();
 	}
 	
-	private void handleJoin(Member sender) {
+	private void handleJoin(Member sender, MessageChannel channel) {
 		audioPlayer = audioPlayerManager.createPlayer();
 		audioPlayer.addListener(trackScheduler);
 		
-		connection = sender.getVoiceState().block().getChannel().block().join(channel -> channel.setProvider(lavaPlayer)).block();
+		//already joined check
+		if(sender.getVoiceState().flatMap(voiceState -> voiceState.getChannel()).block().equals(client.getMemberById(guild.getId(), client.getSelfId().get()).flatMap(self -> self.getVoiceState().flatMap(voiceState -> voiceState.getChannel())).block())) {
+			channel.createMessage("I've already joined your call.").block();
+			return;
+		} else {
+			connection = sender.getVoiceState().block().getChannel().block().join(voiceChannel -> voiceChannel.setProvider(lavaPlayer)).block();
+		}
 	}
 	
-	private void handleLeave(GuildMessageChannel channel) {
+	private void handleLeave(MessageChannel channel) {
 		if(connection == null) {
 			channel.createMessage("I'm not currently in any voice channels.").block();
 		} else {
@@ -716,8 +813,6 @@ public class GuildHandler {
 	}
 	
 	private void handlePlay(String message, MessageChannel channel) {
-		String source;
-		
 		//ensure the audio source parameter is provided
 		try {
 			message.substring(7);
@@ -726,22 +821,22 @@ public class GuildHandler {
 			return;
 		}
 		
+		String source;
+		final boolean link;
+		
 		//determine whether the source is a file or link
 		if(message.contains("http")) {
 			source = message.substring(7);
+			link = true;
 		} else {
 			source = "taunts/" + message.substring(7) + ".mp3";
+			link = false;
 		}
 		
 		audioPlayerManager.loadItem(source, new AudioLoadResultHandler() {
 			@Override
-			public void loadFailed(FriendlyException e) {
-				channel.createMessage("Error: " + e.getMessage()).block();
-			}
-
-			@Override
-			public void noMatches() {
-				channel.createMessage("This looked like a file. No matching audio files for " + source + " were found.").block();
+			public void trackLoaded(AudioTrack track) {
+				trackScheduler.addTrack(track);
 			}
 
 			@Override
@@ -752,24 +847,41 @@ public class GuildHandler {
 			}
 
 			@Override
-			public void trackLoaded(AudioTrack track) {
-				trackScheduler.addTrack(track);
+			public void noMatches() {
+				String response = "This looked like a ";
+				if(link) {
+					response += "link. No acceptable audio source was found.";
+				} else {
+					response += "file. No matching audio files for " + source + " were found.";
+				}
+				channel.createMessage(response).block();
+			}
+			
+			@Override
+			public void loadFailed(FriendlyException e) {
+				channel.createMessage("Error: " + e.getMessage()).block();
 			}
 		});
 	}
 	
-	private void handleSkip() {
-		audioPlayer.stopTrack();
-		AudioTrack next = trackQueue.poll();
-		if(next != null) {
-			audioPlayer.playTrack(next);
+	private void handleSkip(MessageChannel channel) {
+		if(audioPlayer.getPlayingTrack() != null) {
+			audioPlayer.stopTrack();
+			AudioTrack next = trackQueue.poll();
+			if(next != null) {
+				audioPlayer.playTrack(next);
+			}
+			
+		} else {
+			channel.createMessage("I'm not currently playing anything.").block();
 		}
 	}
 	
 	//usage: :remindme: HR:MN PM MonthName dd, yyyy true/false event; hour and day must be 2 digits, time zone must be US Central
-	private void handleAddReminder(String message, Member sender, GuildMessageChannel channel) {
+	private void handleAddReminder(String message, Member sender, MessageChannel channel) {
 		try {
-			Reminder newReminder = parseReminder(message, sender.getId().asLong(), channel.getId().asLong());
+			Reminder newReminder = parseReminder(message, sender.getId().asLong(), channel);
+			//TODO: NULL CHECK!
 			reminders.add(newReminder);
 			storeReminder(newReminder);
 		} catch(IllegalArgumentException e) {
@@ -778,7 +890,7 @@ public class GuildHandler {
 	}
 
 	//usage: :addnew: :triggers: true/false users true/false response
-	private void handleAddRoutine(String message, GuildMessageChannel channel) {
+	private void handleAddRoutine(String message, MessageChannel channel) {
 		try {
 			Routine newRoutine = parseRoutine(message);
 			routines.add(newRoutine);
@@ -815,13 +927,26 @@ public class GuildHandler {
 	*/
 	public void handle(MessageCreateEvent event)
 	{
+		try {
+		//All of Discord's automated messages trigger this event, skip unless they are actually sent by a user
+		if(!event.getMessage().getType().equals(Message.Type.DEFAULT)) return;
+			
 		//TODO: parameterize this check as a boolean to allow poonani to run functional tests on himself?
-		if(event.getMember().get().isBot()) return;
+		//Ensure Poonani or other bots do not trigger him
+		if(event.getMessage().getAuthor().get().isBot()) return;
 
-		String message = event.getMessage().getContent().get();
-		Member sender = event.getMember().get();
 		MessageChannel channel = event.getMessage().getChannel().block();
 		boolean isDM = !(channel instanceof GuildMessageChannel);
+		
+		String message = event.getMessage().getContent().get();
+		
+		Member sender;
+		if(isDM) {
+			sender = null;
+		} else {
+			sender = event.getMember().get();
+		}
+		
 //		//TODO: change to some user-defined role rather than the owner
 //		boolean isAdmin = !isDM && permissionTest(sender, adminRole);
 //		
@@ -841,14 +966,18 @@ public class GuildHandler {
 //		if(message.startsWith(":setcolorpermrole:") && isAdmin)
 //		{
 //			if(isDM) sendGuildRequirementMessage(channel);
-//			else handleColorPermRole(message, (GuildMessageChannel) channel, colorPermRole);
+//			else handleColorPermRole(message, channel, colorPermRole);
 //			return;
 //		}
 //		
+//		//TODO: set admin role
+//		//TODO: set color perm role
+//		
+//		//TODO: dupe check
 //		if(message.startsWith(":addcolor:"))
 //		{
 //			if(isDM) sendGuildRequirementMessage(channel);
-//			else handleAddColor(message, sender, (GuildMessageChannel) channel);
+//			else handleAddColor(message, sender, channel);
 //			return;
 //		}
 //		
@@ -872,17 +1001,18 @@ public class GuildHandler {
 //			return;
 //		}
 		
+		//also check leave and skip when there's nothing playing
 		if(message.startsWith(":join:"))
 		{
 			if(isDM) sendGuildRequirementMessage(channel);
-			else handleJoin(sender);
+			else handleJoin(sender, channel);
 			return;
 		}
 		
 		if(message.startsWith(":leave:"))
 		{
 			if(isDM) sendGuildRequirementMessage(channel);
-			else handleLeave((GuildMessageChannel) channel);
+			else handleLeave(channel);
 			return;
 		}
 		
@@ -896,7 +1026,7 @@ public class GuildHandler {
 		if(message.startsWith(":skip:"))
 		{
 			if(isDM) sendGuildRequirementMessage(channel);
-			else handleSkip();
+			else handleSkip(channel);
 			return;
 		}
 //		
@@ -906,6 +1036,7 @@ public class GuildHandler {
 //			return;
 //		}
 //		
+//		//TODO: dupe check
 //		if(message.startsWith(":addnew:") && isAdmin)
 //		{
 //			if(isDM) sendGuildRequirementMessage(channel);
@@ -918,5 +1049,10 @@ public class GuildHandler {
 //		{
 //			if(r.findTrigger(message, sender)) channel.createMessage(ttsMessage -> ttsMessage.setContent(r.getResponse()).setTts(r.getTTS())).block();
 //		}
+		}
+		catch(Exception e) {
+			//catch-all error handler, PMs me the details
+			authorPM.createMessage("Error occurred in guild " + guild.getName() + " with message: " + e.getMessage()).block();
+		}
 	}
 }

@@ -1,27 +1,18 @@
 package dakota.poonani;
 
-import java.io.File;
-import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ListIterator;
+import java.util.Map;
 import java.util.Scanner;
 import java.util.TreeMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.sedmelluq.discord.lavaplayer.container.MediaContainerDetection;
-import com.sedmelluq.discord.lavaplayer.container.MediaContainerDetectionResult;
-import com.sedmelluq.discord.lavaplayer.container.MediaContainerHints;
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager;
 import com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager;
 import com.sedmelluq.discord.lavaplayer.source.AudioSourceManagers;
-import com.sedmelluq.discord.lavaplayer.source.local.LocalAudioSourceManager;
-import com.sedmelluq.discord.lavaplayer.source.local.LocalSeekableInputStream;
-import com.sedmelluq.discord.lavaplayer.tools.FriendlyException;
-import com.sedmelluq.discord.lavaplayer.track.AudioItem;
-import com.sedmelluq.discord.lavaplayer.track.AudioReference;
 import com.sedmelluq.discord.lavaplayer.track.playback.NonAllocatingAudioFrameBuffer;
 
 import discord4j.core.DiscordClient;
@@ -33,8 +24,6 @@ import discord4j.core.event.domain.message.MessageCreateEvent;
 import discord4j.core.object.data.stored.PresenceBean;
 import discord4j.core.object.entity.MessageChannel;
 import discord4j.core.object.presence.Presence;
-
-import static com.sedmelluq.discord.lavaplayer.tools.FriendlyException.Severity.SUSPICIOUS;
 
 /***********************
 420/Dakota's Discord Bot
@@ -169,8 +158,9 @@ public class Main {
 	private static DiscordClient client;
 	
 	//Keep GuildHandlers sorted by the ID of the guild
-	private static TreeMap<Long, GuildHandler> handlers = new TreeMap<Long, GuildHandler>();
+	private static Map<Long, GuildHandler> handlers = new TreeMap<Long, GuildHandler>();
 	
+	//separate thread that handles checking reminders
 	private static ReminderThread reminderThread = new ReminderThread();
 	private static class ReminderThread extends Thread {
 		public boolean stop = false;
@@ -183,38 +173,6 @@ public class Main {
 				}
 			}
 		}
-	}
-	
-	private final static class JarAudioResourceManager extends LocalAudioSourceManager {
-		//essentially LocalAudioSourceManager, except if attempting to directly create a File fails
-		//loadItem() will use getResource instead, to enable the use of resource files inside jar files
-		@Override
-		public AudioItem loadItem(DefaultAudioPlayerManager manager, AudioReference reference) {
-			AudioItem item = super.loadItem(manager, reference);
-			if(item == null) {
-				File file = new File(getClass().getClassLoader().getResource(reference.identifier).getFile());
-				if(file.exists() && file.isFile() && file.canRead()) {
-					return handleLoadResult(detectContainerForFile(reference, file));
-				} else {
-					System.out.println("File " + file.getName() + " didn't exist");
-					return null;
-				}
-			} else {
-				return item;
-			}
-		}
-		
-		private MediaContainerDetectionResult detectContainerForFile(AudioReference reference, File file) {
-		    try (LocalSeekableInputStream inputStream = new LocalSeekableInputStream(file)) {
-		        int lastDotIndex = file.getName().lastIndexOf('.');
-		        String fileExtension = lastDotIndex >= 0 ? file.getName().substring(lastDotIndex + 1) : null;
-
-		        return new MediaContainerDetection(containerRegistry, reference, inputStream,
-		            MediaContainerHints.from(null, fileExtension)).detectContainer();
-		      } catch (IOException e) {
-		        throw new FriendlyException("Failed to open file for reading.", SUSPICIOUS, e);
-		      }
-		    }
 	}
 	
 	/*
@@ -244,7 +202,6 @@ public class Main {
 		audioPlayerManager.getConfiguration().setFrameBufferFactory(NonAllocatingAudioFrameBuffer::new);
 		AudioSourceManagers.registerRemoteSources(audioPlayerManager);
 		AudioSourceManagers.registerLocalSource(audioPlayerManager);
-		//audioPlayerManager.registerSourceManager(new JarAudioResourceManager());
 		
 		//Initialize GuildHandler
 		GuildHandler.client = client;
@@ -254,7 +211,7 @@ public class Main {
 		EventDispatcher dispatcher = client.getEventDispatcher();
 		dispatcher.on(GuildCreateEvent.class).subscribe(event -> initializeGuild(event));
 		dispatcher.on(MessageCreateEvent.class).subscribe(event -> handlers.get(event.getGuild().block().getId().asLong()).handle(event));
-		dispatcher.on(MemberJoinEvent.class).subscribe(event -> handlers.get(event.getGuild().block().getId().asLong()).handle(event));
+		//dispatcher.on(MemberJoinEvent.class).subscribe(event -> handlers.get(event.getGuild().block().getId().asLong()).handle(event));
 		
 		//Login and wait for it to be connected
 		logger.info("Attempting to log in");
@@ -271,9 +228,18 @@ public class Main {
 		System.out.println("Done initializing. Enter quit to cease execution.");
 		while(!scanner.nextLine().equals("quit")) {}
 		scanner.close();
-		logger.info("Quit command received. Waiting for a reminder check cycle to finish");
+		logger.info("Quit command received. Waiting up to a minute for a reminder check cycle to finish");
 		reminderThread.stop = true;
-		while(reminderThread.isAlive()) {}
+		long start = System.currentTimeMillis();
+		//wait for the reminder thread to quit with a timeout of one minute
+		while(reminderThread.isAlive()) {
+			try {
+				Thread.sleep(1000);
+			} catch (InterruptedException e) {}
+			if(System.currentTimeMillis() - start > 60000) {
+				break;
+			}
+		}
 		logger.info("Logging out");
 		client.logout().block();
 	}
