@@ -175,8 +175,8 @@ public class GuildHandler {
 	 */
 	public GuildHandler(Guild guild) {
 		this.guild = guild;
-		logWithGuildId(LoggerLevel.DEBUG, "Starting handler initialization. beginning storage channel and admin role initialization");
-		retrieveStorageChannelAndAdminRole();
+//		logWithGuildId(LoggerLevel.DEBUG, "Starting handler initialization. beginning storage channel and admin role initialization");
+//		retrieveStorageChannelAndAdminRole();
 //		logWithGuildId(LoggerLevel.DEBUG, "Completed storage channel and admin role initialization, beginning color perm role initialization");
 //		retrieveColorPermRole();
 //		logWithGuildId(LoggerLevel.DEBUG, "Completed color perm role initialization, beginning color role initialization");
